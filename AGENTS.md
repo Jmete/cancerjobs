@@ -21,3 +21,8 @@
 - Stop creating nul files when running commands
 - Don't run dev servers. I will run them for you if needed, and most of the time they are already running.
 - Make sure to solve all tree hydration errors
+
+# Plan
+
+- Reference plans/plan.md
+- Update the checklist at the bottom if they are done
