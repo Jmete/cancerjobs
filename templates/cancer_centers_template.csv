@@ -1,0 +1,4 @@
+center_code,name,lat,lon,country,region,tier,source_url
+pmcc_toronto,Princess Margaret Cancer Centre,43.6582,-79.3907,CA,ON,Tier1,https://www.uhn.ca/PrincessMargaret
+mdanderson_houston,MD Anderson Cancer Center,29.7079,-95.3982,US,TX,Tier1,https://www.mdanderson.org
+sloan_kettering_nyc,Memorial Sloan Kettering Cancer Center,40.7640,-73.9568,US,NY,Tier1,https://www.mskcc.org
