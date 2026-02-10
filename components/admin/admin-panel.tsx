@@ -10,19 +10,48 @@ interface AdminPanelProps {
   adminEmail?: string | null;
 }
 
+interface PendingOfficeDeletionFlag {
+  id: number;
+  centerId: number | null;
+  centerName: string | null;
+  osmType: "node" | "way" | "relation";
+  osmId: number;
+  reason: string | null;
+  status: "pending" | "approved" | "rejected";
+  submittedAt: string;
+  reviewedAt: string | null;
+  officeName: string | null;
+  officeWebsite: string | null;
+}
+
+function formatTimestamp(value: string | null): string {
+  if (!value) return "Unknown";
+  const parsed = new Date(value);
+  if (!Number.isFinite(parsed.getTime())) return value;
+  return parsed.toLocaleString();
+}
+
 export function AdminPanel({ adminEmail = null }: AdminPanelProps) {
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadStatus, setUploadStatus] = useState<string | null>(null);
   const [uploadLoading, setUploadLoading] = useState(false);
+  const [companyUploadFile, setCompanyUploadFile] = useState<File | null>(null);
+  const [companyUploadStatus, setCompanyUploadStatus] = useState<string | null>(
+    null
+  );
+  const [companyUploadLoading, setCompanyUploadLoading] = useState(false);
 
   const [centerId, setCenterId] = useState("");
   const [refreshStatus, setRefreshStatus] = useState<string | null>(null);
   const [refreshLoading, setRefreshLoading] = useState(false);
-  const [refreshRadiusKm, setRefreshRadiusKm] = useState("25");
+  const [refreshRadiusKm, setRefreshRadiusKm] = useState("100");
   const [refreshMaxOffices, setRefreshMaxOffices] = useState("");
 
   const [refreshAllDelayMs, setRefreshAllDelayMs] = useState("1200");
   const [refreshAllBatchSize, setRefreshAllBatchSize] = useState("10");
+  const [refreshAllCenterRetryCount, setRefreshAllCenterRetryCount] = useState("3");
+  const [refreshAllRetryDelayMs, setRefreshAllRetryDelayMs] = useState("2000");
+  const [refreshAllFullClean, setRefreshAllFullClean] = useState(false);
   const [refreshAllStatus, setRefreshAllStatus] = useState<string | null>(null);
   const [refreshAllLoading, setRefreshAllLoading] = useState(false);
 
@@ -31,6 +60,13 @@ export function AdminPanel({ adminEmail = null }: AdminPanelProps) {
   const [statusLoading, setStatusLoading] = useState(false);
   const [statusPayload, setStatusPayload] = useState<string | null>(null);
   const [statusError, setStatusError] = useState<string | null>(null);
+  const [deletionFlagsLoading, setDeletionFlagsLoading] = useState(false);
+  const [deletionFlags, setDeletionFlags] = useState<PendingOfficeDeletionFlag[]>([]);
+  const [deletionFlagsError, setDeletionFlagsError] = useState<string | null>(null);
+  const [deletionFlagsStatus, setDeletionFlagsStatus] = useState<string | null>(null);
+  const [deletionReviewLoadingId, setDeletionReviewLoadingId] = useState<number | null>(
+    null
+  );
 
   async function handleUpload(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -62,6 +98,41 @@ export function AdminPanel({ adminEmail = null }: AdminPanelProps) {
       setUploadStatus(error instanceof Error ? error.message : "CSV upload failed.");
     } finally {
       setUploadLoading(false);
+    }
+  }
+
+  async function handleCompanyUpload(event: React.FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+
+    if (!companyUploadFile) {
+      setCompanyUploadStatus("Select a CSV file first.");
+      return;
+    }
+
+    setCompanyUploadLoading(true);
+    setCompanyUploadStatus(null);
+
+    try {
+      const formData = new FormData();
+      formData.append("file", companyUploadFile, companyUploadFile.name);
+
+      const response = await fetch("/api/admin/actions/upload-companies-csv", {
+        method: "POST",
+        body: formData,
+      });
+
+      const payload = await response.text();
+      if (!response.ok) {
+        throw new Error(payload || "Company CSV upload failed.");
+      }
+
+      setCompanyUploadStatus(payload);
+    } catch (error) {
+      setCompanyUploadStatus(
+        error instanceof Error ? error.message : "Company CSV upload failed."
+      );
+    } finally {
+      setCompanyUploadLoading(false);
     }
   }
 
@@ -160,6 +231,20 @@ export function AdminPanel({ adminEmail = null }: AdminPanelProps) {
       setRefreshAllStatus("Batch size must be between 1 and 200.");
       return;
     }
+    const centerRetryCount = Number(refreshAllCenterRetryCount);
+    if (
+      !Number.isFinite(centerRetryCount) ||
+      centerRetryCount < 0 ||
+      centerRetryCount > 5
+    ) {
+      setRefreshAllStatus("Center retry count must be between 0 and 5.");
+      return;
+    }
+    const retryDelayMs = Number(refreshAllRetryDelayMs);
+    if (!Number.isFinite(retryDelayMs) || retryDelayMs < 0 || retryDelayMs > 60000) {
+      setRefreshAllStatus("Retry delay must be between 0 and 60000 ms.");
+      return;
+    }
 
     const refreshSettings = parseRefreshSearchSettings();
     if (!refreshSettings) {
@@ -183,6 +268,9 @@ export function AdminPanel({ adminEmail = null }: AdminPanelProps) {
           batchSize: Math.trunc(batchSize),
           radiusKm: refreshSettings.radiusKm,
           maxOffices: refreshSettings.maxOffices,
+          fullClean: refreshAllFullClean,
+          centerRetryCount: Math.trunc(centerRetryCount),
+          retryDelayMs: Math.trunc(retryDelayMs),
         }),
       });
 
@@ -223,6 +311,73 @@ export function AdminPanel({ adminEmail = null }: AdminPanelProps) {
       setStatusPayload(null);
     } finally {
       setStatusLoading(false);
+    }
+  }
+
+  async function loadPendingDeletionFlags() {
+    setDeletionFlagsLoading(true);
+    setDeletionFlagsError(null);
+
+    try {
+      const response = await fetch(
+        "/api/admin/actions/offices/deletion-flags?status=pending&limit=100",
+        {
+          method: "GET",
+        }
+      );
+
+      const payloadText = await response.text();
+      if (!response.ok) {
+        throw new Error(payloadText || "Failed to load pending deletion flags.");
+      }
+
+      const payload = JSON.parse(payloadText) as {
+        items?: PendingOfficeDeletionFlag[];
+      };
+      setDeletionFlags(payload.items ?? []);
+    } catch (error) {
+      setDeletionFlagsError(
+        error instanceof Error ? error.message : "Failed to load pending deletion flags."
+      );
+      setDeletionFlags([]);
+    } finally {
+      setDeletionFlagsLoading(false);
+    }
+  }
+
+  async function handleDeletionDecision(
+    flagId: number,
+    decision: "approve" | "reject"
+  ) {
+    setDeletionReviewLoadingId(flagId);
+    setDeletionFlagsError(null);
+    setDeletionFlagsStatus(null);
+
+    try {
+      const response = await fetch(
+        `/api/admin/actions/offices/deletion-flags/${flagId}/decision`,
+        {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ decision }),
+        }
+      );
+
+      const payloadText = await response.text();
+      if (!response.ok) {
+        throw new Error(payloadText || `Failed to ${decision} flag.`);
+      }
+
+      setDeletionFlagsStatus(payloadText);
+      await loadPendingDeletionFlags();
+    } catch (error) {
+      setDeletionFlagsError(
+        error instanceof Error ? error.message : `Failed to ${decision} flag.`
+      );
+    } finally {
+      setDeletionReviewLoadingId(null);
     }
   }
 
@@ -368,6 +523,43 @@ export function AdminPanel({ adminEmail = null }: AdminPanelProps) {
       </article>
 
       <article className="rounded-xl border border-border bg-card p-4 shadow-sm">
+        <h2 className="text-base font-semibold">Upload companies CSV</h2>
+        <p className="mt-1 text-sm text-muted-foreground">
+          Adds company records and skips existing names after normalized-name
+          dedupe.
+        </p>
+
+        <form className="mt-4 space-y-3" onSubmit={handleCompanyUpload}>
+          <label className="grid gap-1 text-sm">
+            CSV file
+            <input
+              type="file"
+              accept=".csv,text/csv"
+              onChange={(event) => {
+                const selected = event.target.files?.[0] ?? null;
+                setCompanyUploadFile(selected);
+              }}
+              className="h-10 rounded-md border border-border bg-background px-3 pt-2"
+            />
+          </label>
+
+          <button
+            type="submit"
+            disabled={companyUploadLoading}
+            className="inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {companyUploadLoading ? "Uploading..." : "Upload CSV"}
+          </button>
+        </form>
+
+        {companyUploadStatus ? (
+          <pre className="mt-3 max-h-52 overflow-auto rounded-md border border-border bg-background p-3 text-xs">
+            {companyUploadStatus}
+          </pre>
+        ) : null}
+      </article>
+
+      <article className="rounded-xl border border-border bg-card p-4 shadow-sm">
         <h2 className="text-base font-semibold">Refresh all centers</h2>
         <p className="mt-1 text-sm text-muted-foreground">
           Runs Overpass refresh across all active centers sequentially using
@@ -389,6 +581,32 @@ export function AdminPanel({ adminEmail = null }: AdminPanelProps) {
           </label>
 
           <label className="grid gap-1 text-sm">
+            Retry count per center
+            <input
+              type="number"
+              min={0}
+              max={5}
+              step={1}
+              value={refreshAllCenterRetryCount}
+              onChange={(event) => setRefreshAllCenterRetryCount(event.target.value)}
+              className="h-10 rounded-md border border-border bg-background px-3"
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm">
+            Retry delay on error (ms)
+            <input
+              type="number"
+              min={0}
+              max={60000}
+              step={100}
+              value={refreshAllRetryDelayMs}
+              onChange={(event) => setRefreshAllRetryDelayMs(event.target.value)}
+              className="h-10 rounded-md border border-border bg-background px-3"
+            />
+          </label>
+
+          <label className="grid gap-1 text-sm">
             Batch size
             <input
               type="number"
@@ -401,12 +619,31 @@ export function AdminPanel({ adminEmail = null }: AdminPanelProps) {
             />
           </label>
 
+          <label className="flex items-start gap-3 rounded-md border border-border bg-background px-3 py-2 text-sm">
+            <input
+              type="checkbox"
+              checked={refreshAllFullClean}
+              onChange={(event) => setRefreshAllFullClean(event.target.checked)}
+              className="mt-1 size-4 rounded border-border accent-primary"
+            />
+            <span className="text-sm">
+              Full clean refresh: delete all saved office points first, then rescan
+              every active center.
+            </span>
+          </label>
+
           <button
             type="submit"
             disabled={refreshAllLoading}
             className="inline-flex h-10 items-center justify-center rounded-md bg-primary px-4 text-sm font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {refreshAllLoading ? "Refreshing all..." : "Refresh all centers"}
+            {refreshAllLoading
+              ? refreshAllFullClean
+                ? "Running full clean refresh..."
+                : "Refreshing all..."
+              : refreshAllFullClean
+                ? "Run full clean refresh"
+                : "Refresh all centers"}
           </button>
         </form>
 
@@ -414,6 +651,107 @@ export function AdminPanel({ adminEmail = null }: AdminPanelProps) {
           <pre className="mt-3 max-h-52 overflow-auto rounded-md border border-border bg-background p-3 text-xs">
             {refreshAllStatus}
           </pre>
+        ) : null}
+      </article>
+
+      <article className="rounded-xl border border-border bg-card p-4 shadow-sm lg:col-span-2">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h2 className="text-base font-semibold">Office deletion flags</h2>
+            <p className="text-sm text-muted-foreground">
+              Review user-submitted office removals and approve bans to block
+              these points from future refresh runs.
+            </p>
+          </div>
+
+          <button
+            type="button"
+            onClick={loadPendingDeletionFlags}
+            disabled={deletionFlagsLoading}
+            className="inline-flex h-10 items-center justify-center rounded-md border border-border bg-background px-4 text-sm font-medium transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {deletionFlagsLoading ? "Loading..." : "Refresh pending flags"}
+          </button>
+        </div>
+
+        {deletionFlagsError ? (
+          <p className="mt-3 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm text-destructive">
+            {deletionFlagsError}
+          </p>
+        ) : null}
+
+        {deletionFlagsStatus ? (
+          <pre className="mt-3 max-h-52 overflow-auto rounded-md border border-border bg-background p-3 text-xs">
+            {deletionFlagsStatus}
+          </pre>
+        ) : null}
+
+        {!deletionFlagsLoading && deletionFlags.length === 0 ? (
+          <p className="mt-3 text-sm text-muted-foreground">
+            No pending office deletion flags.
+          </p>
+        ) : null}
+
+        {deletionFlags.length > 0 ? (
+          <ul className="mt-3 space-y-2">
+            {deletionFlags.map((flag) => (
+              <li
+                key={flag.id}
+                className="rounded-md border border-border bg-background px-3 py-2"
+              >
+                <div className="flex flex-wrap items-start justify-between gap-2">
+                  <div className="min-w-0 flex-1">
+                    <p className="truncate text-sm font-medium">
+                      {flag.officeName ?? `${flag.osmType}/${flag.osmId}`}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Center: {flag.centerName ?? `#${flag.centerId ?? "unknown"}`}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      OSM: {flag.osmType}/{flag.osmId}
+                    </p>
+                    <p className="text-xs text-muted-foreground">
+                      Submitted: {formatTimestamp(flag.submittedAt)}
+                    </p>
+                    {flag.reason ? (
+                      <p className="mt-1 text-xs text-muted-foreground">
+                        Reason: {flag.reason}
+                      </p>
+                    ) : null}
+                    {flag.officeWebsite ? (
+                      <a
+                        href={flag.officeWebsite}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="mt-1 inline-block text-xs text-primary underline-offset-4 hover:underline"
+                      >
+                        website
+                      </a>
+                    ) : null}
+                  </div>
+
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => void handleDeletionDecision(flag.id, "approve")}
+                      disabled={deletionReviewLoadingId === flag.id}
+                      className="inline-flex h-8 items-center justify-center rounded-md bg-primary px-3 text-xs font-medium text-primary-foreground transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      {deletionReviewLoadingId === flag.id ? "Saving..." : "Approve"}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void handleDeletionDecision(flag.id, "reject")}
+                      disabled={deletionReviewLoadingId === flag.id}
+                      className="inline-flex h-8 items-center justify-center rounded-md border border-border bg-background px-3 text-xs font-medium transition-colors hover:bg-accent hover:text-accent-foreground disabled:cursor-not-allowed disabled:opacity-60"
+                    >
+                      Reject
+                    </button>
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
         ) : null}
       </article>
 

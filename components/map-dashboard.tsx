@@ -1,21 +1,42 @@
 "use client";
 
-import { Loader2, MapPin, Building2 } from "lucide-react";
+import { Loader2, MapPin, Building2, Flag } from "lucide-react";
 import Link from "next/link";
 import { useEffect, useMemo, useState } from "react";
 
 import { CentersMap } from "@/components/centers-map";
 import { FilterBar } from "@/components/filter-bar";
 import { ThemeToggle } from "@/components/theme-toggle";
-import { getCenterOffices, getCenters } from "@/lib/api";
+import { flagOfficeForDeletion, getCenterOffices, getCenters } from "@/lib/api";
 import type { CancerCenter, OfficePoint } from "@/lib/types";
 
 function hasEvidence(office: OfficePoint): boolean {
   return Boolean(office.website || office.wikidata || office.brand || office.operator);
 }
 
+function officePointKey(office: OfficePoint): string {
+  return `${office.osmType}-${office.osmId}`;
+}
+
 function normalizeSearch(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function officeMatchesSearch(office: OfficePoint, query: string): boolean {
+  if (!query) return true;
+
+  const searchable = [
+    office.name,
+    office.brand,
+    office.operator,
+    office.website,
+    office.wikidata,
+  ]
+    .filter(Boolean)
+    .join(" ")
+    .toLowerCase();
+
+  return searchable.includes(query);
 }
 
 function centerMatchesSearch(center: CancerCenter, query: string): boolean {
@@ -55,6 +76,8 @@ export function MapDashboard() {
   const [centers, setCenters] = useState<CancerCenter[]>([]);
   const [selectedCenterId, setSelectedCenterId] = useState<number | null>(null);
   const [offices, setOffices] = useState<OfficePoint[]>([]);
+  const [focusedOfficeKey, setFocusedOfficeKey] = useState<string | null>(null);
+  const [focusedOfficeRequestId, setFocusedOfficeRequestId] = useState(0);
 
   const [tier, setTier] = useState("all");
   const [radiusKm, setRadiusKm] = useState(25);
@@ -67,6 +90,9 @@ export function MapDashboard() {
   const [centersLoading, setCentersLoading] = useState(true);
   const [officesLoading, setOfficesLoading] = useState(false);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [officeFlagMessage, setOfficeFlagMessage] = useState<string | null>(null);
+  const [flaggingOfficeKey, setFlaggingOfficeKey] = useState<string | null>(null);
+  const [flaggedOffices, setFlaggedOffices] = useState<Record<string, string>>({});
 
   const debouncedOfficeSearch = useDebouncedValue(officeSearchInput, 250);
   const debouncedCenterSearch = useDebouncedValue(centerSearchInput, 250);
@@ -141,7 +167,6 @@ export function MapDashboard() {
           radiusKm,
           limit: parsedLimit,
           highConfidenceOnly,
-          search: debouncedOfficeSearch.trim() || undefined,
         });
 
         if (cancelled) return;
@@ -167,7 +192,6 @@ export function MapDashboard() {
     radiusKm,
     highConfidenceOnly,
     resultLimit,
-    debouncedOfficeSearch,
   ]);
 
   const tierOptions = useMemo(() => {
@@ -188,10 +212,58 @@ export function MapDashboard() {
     return offices.filter(hasEvidence);
   }, [offices, requireEvidence]);
 
-  const visibleOffices = useMemo(
-    () => evidenceFilteredOffices,
-    [evidenceFilteredOffices]
-  );
+  const searchedOffices = useMemo(() => {
+    const normalizedQuery = normalizeSearch(debouncedOfficeSearch);
+    if (!normalizedQuery) return evidenceFilteredOffices;
+    return evidenceFilteredOffices.filter((office) =>
+      officeMatchesSearch(office, normalizedQuery)
+    );
+  }, [evidenceFilteredOffices, debouncedOfficeSearch]);
+
+  const visibleOffices = useMemo(() => searchedOffices, [searchedOffices]);
+
+  useEffect(() => {
+    if (!focusedOfficeKey) return;
+    if (visibleOffices.some((office) => officePointKey(office) === focusedOfficeKey)) {
+      return;
+    }
+    setFocusedOfficeKey(null);
+    setFocusedOfficeRequestId(0);
+  }, [visibleOffices, focusedOfficeKey]);
+
+  useEffect(() => {
+    setFocusedOfficeKey(null);
+    setFocusedOfficeRequestId(0);
+    setOfficeFlagMessage(null);
+  }, [selectedCenterId]);
+
+  async function handleFlagOffice(office: OfficePoint) {
+    if (!selectedCenterId) return;
+
+    const key = officePointKey(office);
+    setFlaggingOfficeKey(key);
+    setOfficeFlagMessage(null);
+
+    try {
+      const result = await flagOfficeForDeletion({
+        centerId: selectedCenterId,
+        osmType: office.osmType,
+        osmId: office.osmId,
+      });
+
+      setFlaggedOffices((current) => ({
+        ...current,
+        [key]: result.outcome,
+      }));
+      setOfficeFlagMessage(result.message);
+    } catch (error) {
+      setOfficeFlagMessage(
+        error instanceof Error ? error.message : "Failed to submit deletion flag."
+      );
+    } finally {
+      setFlaggingOfficeKey(null);
+    }
+  }
 
   const visibleCentersList = useMemo(() => {
     const normalizedQuery = normalizeSearch(debouncedCenterSearch);
@@ -246,6 +318,8 @@ export function MapDashboard() {
           offices={visibleOffices}
           selectedCenterId={selectedCenterId}
           onSelectCenter={setSelectedCenterId}
+          focusedOfficeKey={focusedOfficeKey}
+          focusedOfficeRequestId={focusedOfficeRequestId}
         />
 
         <aside className="flex max-h-[72vh] flex-col gap-3 overflow-hidden rounded-xl border border-border bg-card p-3 shadow-sm">
@@ -297,29 +371,85 @@ export function MapDashboard() {
               />
             </label>
 
+            {officeFlagMessage ? (
+              <p className="mb-2 rounded-md border border-border bg-card px-2 py-1 text-xs text-muted-foreground">
+                {officeFlagMessage}
+              </p>
+            ) : null}
+
             <ul className="space-y-2">
-              {visibleOffices.map((office) => (
-                <li
-                  key={`${office.osmType}-${office.osmId}`}
-                  className="rounded-md border border-border px-3 py-2 text-sm"
-                >
-                  <p className="font-medium">{office.name ?? "Unnamed office"}</p>
-                  <p className="flex items-center gap-1 text-xs text-muted-foreground">
-                    <MapPin className="h-3 w-3" />
-                    {formatDistance(office.distanceM)}
-                  </p>
-                  {office.website ? (
-                    <a
-                      href={office.website}
-                      target="_blank"
-                      rel="noreferrer noopener"
-                      className="mt-1 inline-block text-xs text-primary underline-offset-4 hover:underline"
-                    >
-                      website
-                    </a>
-                  ) : null}
-                </li>
-              ))}
+              {visibleOffices.map((office) => {
+                const officeKey = officePointKey(office);
+                const flaggedState = flaggedOffices[officeKey];
+                const isFlagging = flaggingOfficeKey === officeKey;
+
+                return (
+                  <li
+                    key={officeKey}
+                    className={[
+                      "rounded-md border px-3 py-2 text-sm transition-colors",
+                      focusedOfficeKey === officeKey
+                        ? "border-primary/50 bg-primary/5"
+                        : "border-border",
+                    ].join(" ")}
+                  >
+                    <div className="flex items-start justify-between gap-2">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setFocusedOfficeKey(officeKey);
+                          setFocusedOfficeRequestId((current) => current + 1);
+                        }}
+                        className="min-w-0 flex-1 text-left"
+                      >
+                        <p className="font-medium">{office.name ?? "Unnamed office"}</p>
+                        <p className="mt-0.5 flex items-center gap-1 text-xs text-muted-foreground">
+                          <MapPin className="h-3 w-3" />
+                          {formatDistance(office.distanceM)}
+                        </p>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => void handleFlagOffice(office)}
+                        disabled={isFlagging}
+                        title={
+                          flaggedState === "already_banned"
+                            ? "Already banned"
+                            : flaggedState
+                              ? "Deletion flag already submitted"
+                              : "Flag for admin deletion review"
+                        }
+                        className={[
+                          "inline-flex h-8 w-8 items-center justify-center rounded-md border transition-colors",
+                          flaggedState
+                            ? "border-amber-500/40 bg-amber-500/10 text-amber-600"
+                            : "border-border bg-background text-muted-foreground hover:bg-accent hover:text-accent-foreground",
+                          isFlagging ? "cursor-wait opacity-70" : "",
+                        ].join(" ")}
+                      >
+                        {isFlagging ? (
+                          <Loader2 className="h-4 w-4 animate-spin" />
+                        ) : (
+                          <Flag className="h-4 w-4" />
+                        )}
+                        <span className="sr-only">Flag office for deletion review</span>
+                      </button>
+                    </div>
+
+                    {office.website ? (
+                      <a
+                        href={office.website}
+                        target="_blank"
+                        rel="noreferrer noopener"
+                        className="mt-1 inline-block text-xs text-primary underline-offset-4 hover:underline"
+                      >
+                        website
+                      </a>
+                    ) : null}
+                  </li>
+                );
+              })}
             </ul>
           </section>
 

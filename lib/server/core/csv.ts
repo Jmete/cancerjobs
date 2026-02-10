@@ -1,4 +1,8 @@
-import type { CsvCenterRow, CsvValidationIssue } from "./types";
+import type {
+  CsvCenterRow,
+  CsvCompanyRow,
+  CsvValidationIssue,
+} from "./types";
 import { sanitizeText } from "./utils";
 
 const REQUIRED_HEADERS = [
@@ -12,8 +16,14 @@ const REQUIRED_HEADERS = [
   "source_url",
 ] as const;
 
+const REQUIRED_COMPANY_HEADERS = ["company_name"] as const;
+
 function normalizeHeader(value: string): string {
   return value.trim().toLowerCase();
+}
+
+function normalizeCompanyName(value: string): string {
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function parseCsvRows(csvText: string): string[][] {
@@ -104,6 +114,34 @@ function sanitizeUrl(url: string | undefined): string | null {
   return cleaned;
 }
 
+function sanitizeKnownAliases(
+  rawValue: string | undefined,
+  companyName: string
+): string | null {
+  const candidate = sanitizeText(rawValue, 4000);
+  if (!candidate) return null;
+
+  const companyNameNormalized = normalizeCompanyName(companyName);
+  const dedupedAliases = new Map<string, string>();
+
+  for (const aliasToken of candidate.split("|")) {
+    const alias = sanitizeText(aliasToken, 180);
+    if (!alias) continue;
+
+    const aliasNormalized = normalizeCompanyName(alias);
+    if (!aliasNormalized || aliasNormalized === companyNameNormalized) {
+      continue;
+    }
+
+    if (!dedupedAliases.has(aliasNormalized)) {
+      dedupedAliases.set(aliasNormalized, alias);
+    }
+  }
+
+  if (dedupedAliases.size === 0) return null;
+  return Array.from(dedupedAliases.values()).join("|");
+}
+
 export function parseCentersCsv(csvText: string): {
   rows: CsvCenterRow[];
   issues: CsvValidationIssue[];
@@ -190,6 +228,82 @@ export function parseCentersCsv(csvText: string): {
       country,
       region,
       sourceUrl,
+    });
+  }
+
+  rows.push(...dedupedRows.values());
+  return { rows, issues };
+}
+
+export function parseCompaniesCsv(csvText: string): {
+  rows: CsvCompanyRow[];
+  issues: CsvValidationIssue[];
+} {
+  const parsedRows = parseCsvRows(csvText);
+  if (parsedRows.length === 0) {
+    throw new Error("CSV parsing failed: no rows found.");
+  }
+
+  const headerRow = parsedRows[0].map(normalizeHeader);
+  const headerIndex = new Map<string, number>();
+  for (let index = 0; index < headerRow.length; index += 1) {
+    headerIndex.set(headerRow[index], index);
+  }
+
+  for (const requiredHeader of REQUIRED_COMPANY_HEADERS) {
+    if (!headerIndex.has(requiredHeader)) {
+      throw new Error(`CSV parsing failed: missing required header \"${requiredHeader}\".`);
+    }
+  }
+
+  const rows: CsvCompanyRow[] = [];
+  const issues: CsvValidationIssue[] = [];
+  const dedupedRows = new Map<string, CsvCompanyRow>();
+
+  for (let rowIndex = 1; rowIndex < parsedRows.length; rowIndex += 1) {
+    const csvRow = parsedRows[rowIndex];
+    const getValue = (header: string): string => {
+      const cellIndex = headerIndex.get(header) ?? -1;
+      if (cellIndex < 0) return "";
+      return csvRow[cellIndex]?.trim() ?? "";
+    };
+
+    const companyName = sanitizeText(getValue("company_name"), 300);
+    if (!companyName) {
+      issues.push({ row: rowIndex + 1, reason: "company_name is required." });
+      continue;
+    }
+
+    const companyNameNormalized = normalizeCompanyName(companyName);
+    if (!companyNameNormalized) {
+      issues.push({
+        row: rowIndex + 1,
+        reason: "company_name must include at least one non-whitespace character.",
+      });
+      continue;
+    }
+
+    const knownAliases = sanitizeKnownAliases(
+      getValue("known_aliases"),
+      companyName
+    );
+    const hqCountry = sanitizeText(getValue("hq_country"), 30);
+    const description = sanitizeText(getValue("desc"), 2000);
+    const companyType = sanitizeText(getValue("type"), 120);
+    const geography = sanitizeText(getValue("geography"), 120);
+    const industry = sanitizeText(getValue("industry"), 180);
+    const suitabilityTier = sanitizeText(getValue("suitability_tier"), 20);
+
+    dedupedRows.set(companyNameNormalized, {
+      companyName,
+      companyNameNormalized,
+      knownAliases,
+      hqCountry,
+      description,
+      companyType,
+      geography,
+      industry,
+      suitabilityTier,
     });
   }
 

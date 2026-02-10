@@ -55,6 +55,7 @@ Server routes:
 - `GET /api/centers`
 - `GET /api/centers/:id/offices`
 - `POST /api/admin/centers/upload-csv`
+- `POST /api/admin/companies/upload-csv`
 - `POST /api/admin/refresh-center/:id`
 - `POST /api/admin/refresh-batch`
 - `POST /api/admin/refresh-all`
@@ -71,6 +72,7 @@ Admin endpoints require `Authorization: Bearer <ADMIN_API_TOKEN>`.
 - Audit office data: `pnpm db:audit-offices`
 - Cleanup duplicates/nameless offices: `pnpm db:cleanup-offices`
 - Upload centers CSV: `pnpm csv:upload -- --url <API_URL> --token <ADMIN_API_TOKEN> --file <csv>`
+- Upload companies CSV: `POST /api/admin/companies/upload-csv` (admin panel action)
 - Health check: `pnpm ops:health-check -- --url <API_URL> --token <ADMIN_API_TOKEN>`
 
 ---
@@ -100,5 +102,13 @@ Common optional:
 - [x] Admin UI supports full-center refresh run with configurable throttling
 - [x] Radius + max-results controls with optional unlimited office query
 - [x] Admin refresh jobs support configurable radius and max offices per center
-- [x] Debounced map sidebar search with server-side office name filtering and visible office count
+- [x] Debounced map sidebar search with office filtering and visible office count
 - [x] SQLite index added for office name lookups
+- [x] Companies table + admin CSV import with normalized-name dedupe and skip-if-existing behavior
+- [x] Overpass refresh pre-filters office points by fuzzy-normalized company/alias matching from `companies`
+- [x] Admin toggle for full clean refresh (delete points, then rescan all active centers)
+- [x] Full refresh retries failed centers with configurable retry count and retry delay
+- [x] Right panel office search now respects active office filters and supports click-to-zoom on map
+- [x] Users can flag offices for deletion and admins can approve bans that persist across refresh runs
+- [x] Map office popup now displays linked company name when available
+- [x] Company matcher hardened against low-signal token false positives

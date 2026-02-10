@@ -1,0 +1,11 @@
+company_name,known_aliases,hq_country,desc,type,geography,industry,suitability_tier
+U.S. Federal Government,US Government|Federal Government,US,National public-sector employer across agencies and functions,government,national,public sector,A
+U.S. Department of Veterans Affairs,VA|Veterans Affairs,US,Federal agency operating nationwide hospitals and clinics,government,national,public sector,A
+U.S. Department of Defense,DoD|DOD,US,Federal defense employer across civilian and military roles,government,national,public sector,A
+U.S. Postal Service,USPS,US,National mail and logistics public service employer,government,national,logistics,A
+Microsoft,MSFT,US,Large technology and cloud services company,public_company,global,tech,A
+Apple,Apple Inc.,US,Consumer technology and services company,public_company,global,tech,A
+Alphabet Inc.,Google,US,Technology holding company; major employer via Google,public_company,global,tech,A
+Amazon,Amazon.com,US,E-commerce cloud and logistics employer,public_company,global,tech,A
+Meta Platforms,Facebook|Instagram,US,Social media and technology company,public_company,global,tech,A
+IBM,International Business Machines,US,Enterprise technology and consulting company,public_company,global,tech,A

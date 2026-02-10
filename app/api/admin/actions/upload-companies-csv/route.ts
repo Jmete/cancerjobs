@@ -17,38 +17,44 @@ export async function POST(request: Request): Promise<Response> {
     return unauthorizedResponse();
   }
 
-  let payload: {
-    delayMs?: number | string;
-    batchSize?: number | string;
-    radiusKm?: number | string;
-    maxOffices?: number | string | null;
-    fullClean?: boolean | string;
-    centerRetryCount?: number | string;
-    retryDelayMs?: number | string;
-  } = {};
+  let file: File | null = null;
 
   try {
-    payload = (await request.json()) as {
-      delayMs?: number | string;
-      batchSize?: number | string;
-      radiusKm?: number | string;
-      maxOffices?: number | string | null;
-      fullClean?: boolean | string;
-      centerRetryCount?: number | string;
-      retryDelayMs?: number | string;
-    };
+    const formData = await request.formData();
+    const formFile = formData.get("file");
+    if (formFile instanceof File) {
+      file = formFile;
+    }
   } catch {
-    return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
+    return NextResponse.json({ error: "Invalid form data." }, { status: 400 });
+  }
+
+  if (!file) {
+    return NextResponse.json(
+      { error: "Attach a CSV file in `file`." },
+      { status: 400 }
+    );
+  }
+
+  const maxCsvBytes = 5 * 1024 * 1024;
+  if (file.size > maxCsvBytes) {
+    return NextResponse.json(
+      { error: "CSV file is too large. Maximum size is 5MB." },
+      { status: 413 }
+    );
   }
 
   try {
-    const upstreamResponse = await forwardToLocalAdminApi("/api/admin/refresh-all", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
+    const upstreamFormData = new FormData();
+    upstreamFormData.append("file", file, file.name);
+
+    const upstreamResponse = await forwardToLocalAdminApi(
+      "/api/admin/companies/upload-csv",
+      {
+        method: "POST",
+        body: upstreamFormData,
+      }
+    );
 
     const upstreamPayload = await upstreamResponse.text();
 
@@ -66,7 +72,7 @@ export async function POST(request: Request): Promise<Response> {
         error:
           error instanceof Error
             ? error.message
-            : "Refresh-all request failed unexpectedly.",
+            : "Upload request failed unexpectedly.",
       },
       { status: 500 }
     );

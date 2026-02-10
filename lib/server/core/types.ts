@@ -34,6 +34,8 @@ export interface Env {
   DEFAULT_RADIUS_M?: string;
   BATCH_CENTERS_PER_RUN?: string;
   OVERPASS_THROTTLE_MS?: string;
+  REFRESH_CENTER_RETRY_COUNT?: string;
+  REFRESH_CENTER_RETRY_DELAY_MS?: string;
   STALE_LINK_DAYS?: string;
   REFRESH_HEALTH_MAX_AGE_MINUTES?: string;
   CORS_ORIGIN?: string;
@@ -72,6 +74,8 @@ export interface Office {
   tagsJson: string | null;
 }
 
+export type OfficeDeletionFlagStatus = "pending" | "approved" | "rejected";
+
 export interface CenterOffice {
   centerId: number;
   osmType: Office["osmType"];
@@ -89,6 +93,18 @@ export interface CsvCenterRow {
   country: string | null;
   region: string | null;
   sourceUrl: string | null;
+}
+
+export interface CsvCompanyRow {
+  companyName: string;
+  companyNameNormalized: string;
+  knownAliases: string | null;
+  hqCountry: string | null;
+  description: string | null;
+  companyType: string | null;
+  geography: string | null;
+  industry: string | null;
+  suitabilityTier: string | null;
 }
 
 export interface CsvValidationIssue {

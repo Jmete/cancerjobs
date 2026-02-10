@@ -10,6 +10,8 @@ Cancer Jobs helps cancer patients and caretakers discover job opportunities near
 - Office refresh includes Wikidata enrichment for:
   - Employees (`P1128`)
   - Market capitalization (`P2226`)
+- Office refresh saves only points whose name/brand/operator matches a company
+  name or alias from the `companies` table.
 
 ## Local Development
 
@@ -51,6 +53,7 @@ pnpm lint
 - `GET /api/centers`
 - `GET /api/centers/:id/offices?radiusKm=25&limit=500&highConfidenceOnly=false`
 - `POST /api/admin/centers/upload-csv` (Bearer token)
+- `POST /api/admin/companies/upload-csv` (Bearer token)
 - `POST /api/admin/refresh-center/:id` (Bearer token)
 - `POST /api/admin/refresh-batch` (Bearer token)
 - `POST /api/admin/refresh-all` (Bearer token)
@@ -85,6 +88,9 @@ First-time admin bootstrap:
 Refresh controls in `/admin` support:
 - Radius options: `10`, `25`, `50`, `100` km
 - Max offices per center: blank for unlimited
+- Company CSV upload with dedupe by normalized `company_name`
+- Company pre-filtering during refresh so only known companies are persisted
+- Optional full clean refresh toggle (deletes all saved office points, then rescans)
 
 ## CSV Upload for Cancer Centers
 
@@ -115,6 +121,30 @@ pnpm csv:upload -- \
   --token <ADMIN_API_TOKEN> \
   --file templates/cancer_centers_template.csv
 ```
+
+## CSV Upload for Companies
+
+Upload companies with `POST /api/admin/companies/upload-csv`.
+
+### Required CSV columns
+
+- `company_name`
+
+### Optional CSV columns
+
+- `known_aliases` (pipe-delimited aliases)
+- `hq_country`
+- `desc`
+- `type`
+- `geography`
+- `industry`
+- `suitability_tier`
+
+### Behavior
+
+- Rows are deduped by normalized `company_name` (case-insensitive, collapsed whitespace).
+- Existing companies are skipped (not updated).
+- Duplicate company names inside the same CSV are collapsed to one row.
 
 ## Health Check
 

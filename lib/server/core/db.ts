@@ -2,6 +2,8 @@ import type {
   CancerCenter,
   CenterOffice,
   CsvCenterRow,
+  CsvCompanyRow,
+  OfficeDeletionFlagStatus,
   SqlDatabase,
   SqlPreparedStatement,
   Office,
@@ -49,7 +51,49 @@ interface CountRecord {
   count: number | string;
 }
 
+interface CompanyRecord {
+  id: number;
+  company_name: string;
+  company_name_normalized: string;
+  known_aliases: string | null;
+}
+
+interface OfficeDeletionFlagIdRecord {
+  id: number;
+}
+
+interface OfficeDeletionFlagReviewRecord {
+  id: number;
+  centerId: number | null;
+  centerName: string | null;
+  osmType: Office["osmType"];
+  osmId: number;
+  reason: string | null;
+  status: OfficeDeletionFlagStatus;
+  submittedAt: string;
+  reviewedAt: string | null;
+  officeName: string | null;
+  officeWebsite: string | null;
+  officeLat: number | null;
+  officeLon: number | null;
+}
+
+interface OfficeDeletionFlagStatusRecord {
+  status: OfficeDeletionFlagStatus;
+  osmType: Office["osmType"];
+  osmId: number;
+}
+
+interface BannedOfficeRecord {
+  osmType: Office["osmType"];
+  osmId: number;
+}
+
 function normalizeOfficeName(name: string): string {
+  return name.trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+function normalizeCompanyName(name: string): string {
   return name.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
@@ -169,6 +213,12 @@ export async function listOfficesForCenter(
     "  ON o.osm_type = co.osm_type AND o.osm_id = co.osm_id",
     "WHERE co.center_id = ?",
     "  AND co.distance_m <= ?",
+    "  AND NOT EXISTS (",
+    "    SELECT 1",
+    "    FROM banned_offices bo",
+    "    WHERE bo.osm_type = co.osm_type",
+    "      AND bo.osm_id = co.osm_id",
+    "  )",
     "  AND o.name IS NOT NULL",
     "  AND TRIM(o.name) <> ''",
     highConfidenceOnly ? "  AND o.low_confidence = 0" : "",
@@ -208,6 +258,392 @@ export async function listOfficesForCenter(
   }
 
   return Array.from(deduped.values());
+}
+
+export interface SubmitOfficeDeletionFlagInput {
+  centerId: number | null;
+  osmType: Office["osmType"];
+  osmId: number;
+  reason: string | null;
+}
+
+export interface SubmitOfficeDeletionFlagResult {
+  outcome: "created" | "already_pending" | "already_banned";
+  flagId: number | null;
+}
+
+export interface OfficeDeletionFlagForReview {
+  id: number;
+  centerId: number | null;
+  centerName: string | null;
+  osmType: Office["osmType"];
+  osmId: number;
+  reason: string | null;
+  status: OfficeDeletionFlagStatus;
+  submittedAt: string;
+  reviewedAt: string | null;
+  officeName: string | null;
+  officeWebsite: string | null;
+  officeLat: number | null;
+  officeLon: number | null;
+}
+
+export interface ReviewOfficeDeletionFlagResult {
+  outcome: "approved" | "rejected" | "already_approved" | "already_rejected" | "not_found";
+  flagId: number;
+  osmType: Office["osmType"] | null;
+  osmId: number | null;
+  deletedLinks: number;
+  deletedOffices: number;
+}
+
+export async function officeExistsForCenter(
+  db: SqlDatabase,
+  centerId: number,
+  osmType: Office["osmType"],
+  osmId: number
+): Promise<boolean> {
+  const row = await db
+    .prepare(
+      [
+        "SELECT 1 AS found",
+        "FROM center_office",
+        "WHERE center_id = ?",
+        "  AND osm_type = ?",
+        "  AND osm_id = ?",
+        "LIMIT 1",
+      ].join("\n")
+    )
+    .bind(centerId, osmType, osmId)
+    .first<{ found: number }>();
+
+  return Boolean(row?.found);
+}
+
+export async function submitOfficeDeletionFlag(
+  db: SqlDatabase,
+  input: SubmitOfficeDeletionFlagInput
+): Promise<SubmitOfficeDeletionFlagResult> {
+  const banned = await db
+    .prepare(
+      [
+        "SELECT 1 AS found",
+        "FROM banned_offices",
+        "WHERE osm_type = ?",
+        "  AND osm_id = ?",
+        "LIMIT 1",
+      ].join("\n")
+    )
+    .bind(input.osmType, input.osmId)
+    .first<{ found: number }>();
+
+  if (banned?.found) {
+    return {
+      outcome: "already_banned",
+      flagId: null,
+    };
+  }
+
+  const pending = await db
+    .prepare(
+      [
+        "SELECT id",
+        "FROM office_deletion_flags",
+        "WHERE osm_type = ?",
+        "  AND osm_id = ?",
+        "  AND status = 'pending'",
+        "ORDER BY id DESC",
+        "LIMIT 1",
+      ].join("\n")
+    )
+    .bind(input.osmType, input.osmId)
+    .first<OfficeDeletionFlagIdRecord>();
+
+  if (pending?.id) {
+    return {
+      outcome: "already_pending",
+      flagId: pending.id,
+    };
+  }
+
+  const inserted = await db
+    .prepare(
+      [
+        "INSERT INTO office_deletion_flags (",
+        "  center_id, osm_type, osm_id, reason, status, submitted_at",
+        ") VALUES (?, ?, ?, ?, 'pending', datetime('now'))",
+      ].join("\n")
+    )
+    .bind(input.centerId, input.osmType, input.osmId, input.reason)
+    .run();
+
+  const insertedId = Number(inserted.meta?.last_row_id ?? 0);
+  if (insertedId > 0) {
+    return {
+      outcome: "created",
+      flagId: insertedId,
+    };
+  }
+
+  const fallback = await db
+    .prepare(
+      [
+        "SELECT id",
+        "FROM office_deletion_flags",
+        "WHERE osm_type = ?",
+        "  AND osm_id = ?",
+        "  AND status = 'pending'",
+        "ORDER BY id DESC",
+        "LIMIT 1",
+      ].join("\n")
+    )
+    .bind(input.osmType, input.osmId)
+    .first<OfficeDeletionFlagIdRecord>();
+
+  return {
+    outcome: "already_pending",
+    flagId: fallback?.id ?? null,
+  };
+}
+
+export async function listOfficeDeletionFlags(
+  db: SqlDatabase,
+  options?: {
+    status?: OfficeDeletionFlagStatus;
+    limit?: number;
+  }
+): Promise<OfficeDeletionFlagForReview[]> {
+  const sql = [
+    "SELECT",
+    "  f.id AS id,",
+    "  f.center_id AS centerId,",
+    "  cc.name AS centerName,",
+    "  f.osm_type AS osmType,",
+    "  f.osm_id AS osmId,",
+    "  f.reason AS reason,",
+    "  f.status AS status,",
+    "  f.submitted_at AS submittedAt,",
+    "  f.reviewed_at AS reviewedAt,",
+    "  o.name AS officeName,",
+    "  o.website AS officeWebsite,",
+    "  o.lat AS officeLat,",
+    "  o.lon AS officeLon",
+    "FROM office_deletion_flags f",
+    "LEFT JOIN cancer_centers cc ON cc.id = f.center_id",
+    "LEFT JOIN offices o",
+    "  ON o.osm_type = f.osm_type AND o.osm_id = f.osm_id",
+    "WHERE 1 = 1",
+    options?.status ? "  AND f.status = ?" : "",
+    "ORDER BY f.submitted_at DESC, f.id DESC",
+    "LIMIT ?",
+  ]
+    .filter(Boolean)
+    .join("\n");
+
+  const bindings: unknown[] = [];
+  if (options?.status) {
+    bindings.push(options.status);
+  }
+  bindings.push(Math.max(1, Math.min(500, options?.limit ?? 100)));
+
+  const result = await db
+    .prepare(sql)
+    .bind(...bindings)
+    .all<OfficeDeletionFlagReviewRecord>();
+
+  return (result.results ?? []).map((item) => ({
+    id: item.id,
+    centerId: item.centerId,
+    centerName: item.centerName,
+    osmType: item.osmType,
+    osmId: item.osmId,
+    reason: item.reason,
+    status: item.status,
+    submittedAt: item.submittedAt,
+    reviewedAt: item.reviewedAt,
+    officeName: item.officeName,
+    officeWebsite: item.officeWebsite,
+    officeLat: item.officeLat,
+    officeLon: item.officeLon,
+  }));
+}
+
+async function getOfficeDeletionFlagStatus(
+  db: SqlDatabase,
+  flagId: number
+): Promise<OfficeDeletionFlagStatusRecord | null> {
+  return db
+    .prepare(
+      [
+        "SELECT status, osm_type AS osmType, osm_id AS osmId",
+        "FROM office_deletion_flags",
+        "WHERE id = ?",
+      ].join("\n")
+    )
+    .bind(flagId)
+    .first<OfficeDeletionFlagStatusRecord>();
+}
+
+export async function approveOfficeDeletionFlag(
+  db: SqlDatabase,
+  flagId: number
+): Promise<ReviewOfficeDeletionFlagResult> {
+  const existing = await getOfficeDeletionFlagStatus(db, flagId);
+  if (!existing) {
+    return {
+      outcome: "not_found",
+      flagId,
+      osmType: null,
+      osmId: null,
+      deletedLinks: 0,
+      deletedOffices: 0,
+    };
+  }
+
+  if (existing.status === "approved") {
+    return {
+      outcome: "already_approved",
+      flagId,
+      osmType: existing.osmType,
+      osmId: existing.osmId,
+      deletedLinks: 0,
+      deletedOffices: 0,
+    };
+  }
+
+  await db
+    .prepare(
+      [
+        "UPDATE office_deletion_flags",
+        "SET status = 'approved',",
+        "    reviewed_at = datetime('now')",
+        "WHERE id = ?",
+      ].join("\n")
+    )
+    .bind(flagId)
+    .run();
+
+  await db
+    .prepare(
+      [
+        "INSERT INTO banned_offices (osm_type, osm_id, approved_flag_id, approved_at)",
+        "VALUES (?, ?, ?, datetime('now'))",
+        "ON CONFLICT(osm_type, osm_id) DO UPDATE SET",
+        "  approved_flag_id = excluded.approved_flag_id,",
+        "  approved_at = excluded.approved_at",
+      ].join("\n")
+    )
+    .bind(existing.osmType, existing.osmId, flagId)
+    .run();
+
+  const deletedLinks = await db
+    .prepare(
+      [
+        "DELETE FROM center_office",
+        "WHERE osm_type = ?",
+        "  AND osm_id = ?",
+      ].join("\n")
+    )
+    .bind(existing.osmType, existing.osmId)
+    .run();
+
+  const deletedOffices = await db
+    .prepare(
+      [
+        "DELETE FROM offices",
+        "WHERE osm_type = ?",
+        "  AND osm_id = ?",
+      ].join("\n")
+    )
+    .bind(existing.osmType, existing.osmId)
+    .run();
+
+  return {
+    outcome: "approved",
+    flagId,
+    osmType: existing.osmType,
+    osmId: existing.osmId,
+    deletedLinks: Number(deletedLinks.meta?.changes ?? 0),
+    deletedOffices: Number(deletedOffices.meta?.changes ?? 0),
+  };
+}
+
+export async function rejectOfficeDeletionFlag(
+  db: SqlDatabase,
+  flagId: number
+): Promise<ReviewOfficeDeletionFlagResult> {
+  const existing = await getOfficeDeletionFlagStatus(db, flagId);
+  if (!existing) {
+    return {
+      outcome: "not_found",
+      flagId,
+      osmType: null,
+      osmId: null,
+      deletedLinks: 0,
+      deletedOffices: 0,
+    };
+  }
+
+  if (existing.status === "approved") {
+    return {
+      outcome: "already_approved",
+      flagId,
+      osmType: existing.osmType,
+      osmId: existing.osmId,
+      deletedLinks: 0,
+      deletedOffices: 0,
+    };
+  }
+
+  if (existing.status === "rejected") {
+    return {
+      outcome: "already_rejected",
+      flagId,
+      osmType: existing.osmType,
+      osmId: existing.osmId,
+      deletedLinks: 0,
+      deletedOffices: 0,
+    };
+  }
+
+  await db
+    .prepare(
+      [
+        "UPDATE office_deletion_flags",
+        "SET status = 'rejected',",
+        "    reviewed_at = datetime('now')",
+        "WHERE id = ?",
+      ].join("\n")
+    )
+    .bind(flagId)
+    .run();
+
+  return {
+    outcome: "rejected",
+    flagId,
+    osmType: existing.osmType,
+    osmId: existing.osmId,
+    deletedLinks: 0,
+    deletedOffices: 0,
+  };
+}
+
+export async function listBannedOfficeKeys(
+  db: SqlDatabase
+): Promise<Array<{ osmType: Office["osmType"]; osmId: number }>> {
+  const result = await db
+    .prepare(
+      [
+        "SELECT osm_type AS osmType, osm_id AS osmId",
+        "FROM banned_offices",
+      ].join("\n")
+    )
+    .all<BannedOfficeRecord>();
+
+  return (result.results ?? []).map((row) => ({
+    osmType: row.osmType,
+    osmId: row.osmId,
+  }));
 }
 
 export async function getRefreshCursor(db: SqlDatabase): Promise<number> {
@@ -455,6 +891,43 @@ export async function pruneStaleCenterLinks(
   return Number(result.meta?.changes ?? 0);
 }
 
+export async function pruneCenterLinksNotSeenSince(
+  db: SqlDatabase,
+  centerId: number,
+  seenAt: string
+): Promise<number> {
+  const result = await db
+    .prepare(
+      [
+        "DELETE FROM center_office",
+        "WHERE center_id = ?",
+        "  AND last_seen < ?",
+      ].join("\n")
+    )
+    .bind(centerId, seenAt)
+    .run();
+
+  return Number(result.meta?.changes ?? 0);
+}
+
+export interface PurgeOfficePointsResult {
+  linksDeleted: number;
+  officesDeleted: number;
+}
+
+export async function purgeAllOfficePoints(
+  db: SqlDatabase
+): Promise<PurgeOfficePointsResult> {
+  const deletedLinks = await db.prepare("DELETE FROM center_office").run();
+  const deletedOffices = await db.prepare("DELETE FROM offices").run();
+  await setRefreshCursor(db, 0);
+
+  return {
+    linksDeleted: Number(deletedLinks.meta?.changes ?? 0),
+    officesDeleted: Number(deletedOffices.meta?.changes ?? 0),
+  };
+}
+
 export async function upsertCenterFromCsv(
   db: SqlDatabase,
   row: CsvCenterRow,
@@ -517,6 +990,69 @@ export async function disableCentersMissingFromSync(
     .run();
 
   return Number(result.meta?.changes ?? 0);
+}
+
+export async function insertCompanyFromCsv(
+  db: SqlDatabase,
+  row: CsvCompanyRow
+): Promise<"inserted" | "skipped"> {
+  const normalizedName =
+    row.companyNameNormalized || normalizeCompanyName(row.companyName);
+  if (!normalizedName) {
+    return "skipped";
+  }
+
+  const result = await db
+    .prepare(
+      [
+        "INSERT INTO companies (",
+        "  company_name, company_name_normalized, known_aliases, hq_country, description, type, geography, industry, suitability_tier, updated_at",
+        ") VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+        "ON CONFLICT(company_name_normalized) DO NOTHING",
+      ].join("\n")
+    )
+    .bind(
+      row.companyName,
+      normalizedName,
+      row.knownAliases,
+      row.hqCountry,
+      row.description,
+      row.companyType,
+      row.geography,
+      row.industry,
+      row.suitabilityTier
+    )
+    .run();
+
+  return Number(result.meta?.changes ?? 0) > 0 ? "inserted" : "skipped";
+}
+
+export interface CompanyRecordForMatching {
+  id: number;
+  companyName: string;
+  companyNameNormalized: string;
+  knownAliases: string | null;
+}
+
+export async function listCompaniesForMatching(
+  db: SqlDatabase
+): Promise<CompanyRecordForMatching[]> {
+  const result = await db
+    .prepare(
+      [
+        "SELECT id, company_name, company_name_normalized, known_aliases",
+        "FROM companies",
+        "ORDER BY id ASC",
+      ].join("\n")
+    )
+    .all<CompanyRecord>();
+
+  return (result.results ?? []).map((record) => ({
+    id: record.id,
+    companyName: record.company_name,
+    companyNameNormalized: record.company_name_normalized,
+    knownAliases: record.known_aliases,
+  }));
 }
 
 export interface OperationalStatus {

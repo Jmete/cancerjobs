@@ -12,6 +12,20 @@ interface GetCenterOfficesOptions {
   search?: string;
 }
 
+interface FlagOfficeForDeletionOptions {
+  centerId: number;
+  osmType: "node" | "way" | "relation";
+  osmId: number;
+  reason?: string;
+}
+
+export interface FlagOfficeForDeletionResponse {
+  ok: boolean;
+  outcome: "created" | "already_pending" | "already_banned";
+  flagId: number | null;
+  message: string;
+}
+
 function apiBaseUrl(): string {
   return (process.env.NEXT_PUBLIC_API_BASE_URL ?? "").replace(/\/$/, "");
 }
@@ -78,4 +92,23 @@ export async function getCenterOffices(
   );
 
   return parseJsonOrThrow<CenterOfficesResponse>(response);
+}
+
+export async function flagOfficeForDeletion(
+  options: FlagOfficeForDeletionOptions
+): Promise<FlagOfficeForDeletionResponse> {
+  const response = await fetch(endpoint("/api/offices/flag-deletion"), {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({
+      centerId: options.centerId,
+      osmType: options.osmType,
+      osmId: options.osmId,
+      reason: options.reason,
+    }),
+  });
+
+  return parseJsonOrThrow<FlagOfficeForDeletionResponse>(response);
 }

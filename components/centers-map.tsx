@@ -16,6 +16,8 @@ interface CentersMapProps {
   centers: CancerCenter[];
   offices: OfficePoint[];
   selectedCenterId: number | null;
+  focusedOfficeKey: string | null;
+  focusedOfficeRequestId: number;
   onSelectCenter: (centerId: number) => void;
 }
 
@@ -24,10 +26,16 @@ function formatDistance(distanceM: number): string {
   return `${(distanceM / 1000).toFixed(1)} km`;
 }
 
+function officePointKey(office: OfficePoint): string {
+  return `${office.osmType}-${office.osmId}`;
+}
+
 export function CentersMap({
   centers,
   offices,
   selectedCenterId,
+  focusedOfficeKey,
+  focusedOfficeRequestId,
   onSelectCenter,
 }: CentersMapProps) {
   const mapRef = useRef<MapRef | null>(null);
@@ -46,6 +54,24 @@ export function CentersMap({
       duration: 900,
     });
   }, [selectedCenter]);
+
+  const focusedOffice = useMemo(
+    () =>
+      focusedOfficeKey
+        ? offices.find((office) => officePointKey(office) === focusedOfficeKey) ?? null
+        : null,
+    [offices, focusedOfficeKey]
+  );
+
+  useEffect(() => {
+    if (!mapRef.current || !focusedOffice) return;
+
+    mapRef.current.flyTo({
+      center: [focusedOffice.lon, focusedOffice.lat],
+      zoom: 13.5,
+      duration: 850,
+    });
+  }, [focusedOffice]);
 
   return (
     <div className="h-[58vh] min-h-[360px] overflow-hidden rounded-xl border border-border bg-card md:h-[72vh]">
@@ -97,48 +123,62 @@ export function CentersMap({
           );
         })}
 
-        {offices.map((office) => (
-          <MapMarker
-            key={`office-${office.osmType}-${office.osmId}`}
-            longitude={office.lon}
-            latitude={office.lat}
-          >
-            <MarkerContent>
-              <div
-                className={[
-                  "h-3 w-3 rounded-full border border-white shadow-md",
-                  office.lowConfidence ? "bg-amber-500" : "bg-rose-600",
-                ].join(" ")}
-              />
-            </MarkerContent>
-            <MarkerPopup closeButton>
-              <div className="max-w-xs space-y-1 text-sm">
+        {offices.map((office) => {
+          const officeKey = officePointKey(office);
+          const focused = officeKey === focusedOfficeKey;
+
+          return (
+            <MapMarker
+              key={`office-${officeKey}`}
+              longitude={office.lon}
+              latitude={office.lat}
+            >
+              <MarkerContent>
+                <div
+                  className={[
+                    "h-3 w-3 rounded-full border border-white shadow-md transition-transform",
+                    focused ? "scale-125 bg-fuchsia-600" : "",
+                    !focused && office.lowConfidence ? "bg-amber-500" : "",
+                    !focused && !office.lowConfidence ? "bg-rose-600" : "",
+                  ].join(" ")}
+                />
+              </MarkerContent>
+              <MarkerPopup closeButton open={focused} openTrigger={focusedOfficeRequestId}>
+                <div className="max-w-xs space-y-1 text-sm">
                 <p className="font-semibold">{office.name ?? "Unnamed office"}</p>
                 <p className="text-muted-foreground">{formatDistance(office.distanceM)} away</p>
+                {office.linkedCompanyName ? (
+                  <p className="text-muted-foreground">
+                    Linked company: {office.linkedCompanyName}
+                  </p>
+                ) : (
+                  <p className="text-muted-foreground">Linked company: Unknown</p>
+                )}
                 {office.website ? (
                   <a
                     href={office.website}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="text-primary underline-offset-4 hover:underline"
-                  >
-                    Visit website
-                  </a>
-                ) : null}
-                {office.wikidata ? (
-                  <a
-                    href={`https://www.wikidata.org/wiki/${office.wikidata}`}
-                    target="_blank"
-                    rel="noreferrer noopener"
-                    className="block text-primary underline-offset-4 hover:underline"
-                  >
-                    View Wikidata
-                  </a>
-                ) : null}
-              </div>
-            </MarkerPopup>
-          </MapMarker>
-        ))}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="text-primary underline-offset-4 hover:underline"
+                    >
+                      Visit website
+                    </a>
+                  ) : null}
+                  {office.wikidata ? (
+                    <a
+                      href={`https://www.wikidata.org/wiki/${office.wikidata}`}
+                      target="_blank"
+                      rel="noreferrer noopener"
+                      className="block text-primary underline-offset-4 hover:underline"
+                    >
+                      View Wikidata
+                    </a>
+                  ) : null}
+                </div>
+              </MarkerPopup>
+            </MapMarker>
+          );
+        })}
       </Map>
     </div>
   );

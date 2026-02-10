@@ -28,6 +28,8 @@ export interface OfficePoint {
   lon: number;
   lowConfidence: boolean;
   distanceM: number;
+  linkedCompanyId: number | null;
+  linkedCompanyName: string | null;
 }
 
 export interface CenterOfficesResponse {

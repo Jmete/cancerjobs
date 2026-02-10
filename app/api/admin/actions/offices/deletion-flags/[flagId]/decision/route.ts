@@ -17,38 +17,34 @@ export async function POST(request: Request): Promise<Response> {
     return unauthorizedResponse();
   }
 
-  let payload: {
-    delayMs?: number | string;
-    batchSize?: number | string;
-    radiusKm?: number | string;
-    maxOffices?: number | string | null;
-    fullClean?: boolean | string;
-    centerRetryCount?: number | string;
-    retryDelayMs?: number | string;
-  } = {};
+  const pathname = new URL(request.url).pathname;
+  const match = pathname.match(
+    /^\/api\/admin\/actions\/offices\/deletion-flags\/(\d+)\/decision$/
+  );
+  const flagId = match?.[1];
 
+  if (!flagId) {
+    return NextResponse.json({ error: "Invalid flag id." }, { status: 400 });
+  }
+
+  let payload: { decision?: string } = {};
   try {
-    payload = (await request.json()) as {
-      delayMs?: number | string;
-      batchSize?: number | string;
-      radiusKm?: number | string;
-      maxOffices?: number | string | null;
-      fullClean?: boolean | string;
-      centerRetryCount?: number | string;
-      retryDelayMs?: number | string;
-    };
+    payload = (await request.json()) as { decision?: string };
   } catch {
     return NextResponse.json({ error: "Invalid request body." }, { status: 400 });
   }
 
   try {
-    const upstreamResponse = await forwardToLocalAdminApi("/api/admin/refresh-all", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-      },
-      body: JSON.stringify(payload),
-    });
+    const upstreamResponse = await forwardToLocalAdminApi(
+      `/api/admin/offices/deletion-flags/${flagId}/decision`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(payload),
+      }
+    );
 
     const upstreamPayload = await upstreamResponse.text();
 
@@ -66,7 +62,7 @@ export async function POST(request: Request): Promise<Response> {
         error:
           error instanceof Error
             ? error.message
-            : "Refresh-all request failed unexpectedly.",
+            : "Office deletion review request failed unexpectedly.",
       },
       { status: 500 }
     );

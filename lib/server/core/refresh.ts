@@ -1,12 +1,20 @@
 import {
   applyWikidataEnrichment,
   getRefreshCursor,
+  listBannedOfficeKeys,
+  listCompaniesForMatching,
   listStaleWikidataEntityIds,
   listCentersAfterCursor,
+  pruneCenterLinksNotSeenSince,
+  purgeAllOfficePoints,
   pruneStaleCenterLinks,
   setRefreshCursor,
   upsertOfficesAndLinks,
 } from "./db";
+import {
+  buildCompanyMatchIndex,
+  filterOfficesWithKnownCompanies,
+} from "./company-match";
 import { buildOfficesQuery, fetchOverpassElements, normalizeOverpassElements } from "./overpass";
 import type { CancerCenter, CenterOffice, Env } from "./types";
 import { fetchWikidataEnrichment } from "./wikidata";
@@ -22,6 +30,8 @@ export interface RefreshCenterResult {
   centerId: number;
   centerName: string;
   officesFetched: number;
+  officesMatchedCompanies: number;
+  officesFilteredOutNoCompanyMatch: number;
   linksUpserted: number;
   prunedLinks: number;
   wikidataEntitiesFetched: number;
@@ -31,19 +41,28 @@ export interface RefreshCenterResult {
 export interface RefreshSearchOptions {
   radiusM?: number;
   maxOffices?: number | null;
+  companyMatchIndex?: CompanyMatchIndex;
+  bannedOfficeKeys?: BannedOfficeKeySet;
 }
 
 export interface RefreshAllResult {
+  fullClean: boolean;
+  cleanedLinksDeleted: number;
+  cleanedOfficesDeleted: number;
   centersAttempted: number;
   centersSucceeded: number;
   centersFailed: number;
   officesFetched: number;
+  officesMatchedCompanies: number;
+  officesFilteredOutNoCompanyMatch: number;
   wikidataEntitiesFetched: number;
   wikidataOfficesUpdated: number;
   throttleMs: number;
   batchSize: number;
   radiusM: number;
   maxOffices: number | null;
+  centerRetryCount: number;
+  retryDelayMs: number;
   cursorEnd: number;
 }
 
@@ -64,6 +83,16 @@ function createLinks(
 interface WikidataEnrichmentStats {
   entitiesFetched: number;
   officesUpdated: number;
+}
+
+type CompanyMatchIndex = ReturnType<typeof buildCompanyMatchIndex>;
+type BannedOfficeKeySet = Set<string>;
+
+function toNonNegativeInt(value: unknown, fallback: number): number {
+  if (value === undefined || value === null) return fallback;
+  const parsed = Number.parseInt(String(value), 10);
+  if (!Number.isFinite(parsed) || parsed < 0) return fallback;
+  return parsed;
 }
 
 function capOfficesByLimit(
@@ -91,6 +120,22 @@ function capOfficesByLimit(
       return leftDistance - rightDistance;
     })
     .slice(0, maxOffices);
+}
+
+async function loadCompanyMatchIndex(env: Env): Promise<CompanyMatchIndex> {
+  const companies = await listCompaniesForMatching(env.DB);
+  return buildCompanyMatchIndex(companies);
+}
+
+function officeKey(osmType: CenterOffice["osmType"], osmId: number): string {
+  return `${osmType}:${osmId}`;
+}
+
+async function loadBannedOfficeKeys(env: Env): Promise<BannedOfficeKeySet> {
+  const bannedOffices = await listBannedOfficeKeys(env.DB);
+  return new Set(
+    bannedOffices.map((office) => officeKey(office.osmType, office.osmId))
+  );
 }
 
 async function enrichOfficesWithWikidata(
@@ -176,7 +221,7 @@ export async function refreshCenterOffices(
     Number.isFinite(options.radiusM) &&
     options.radiusM > 0
       ? Math.trunc(options.radiusM)
-      : toPositiveInt(env.DEFAULT_RADIUS_M, 50000);
+      : toPositiveInt(env.DEFAULT_RADIUS_M, 100000);
   const maxOffices =
     typeof options?.maxOffices === "number" &&
     Number.isFinite(options.maxOffices) &&
@@ -184,10 +229,18 @@ export async function refreshCenterOffices(
       ? Math.trunc(options.maxOffices)
       : null;
   const staleDays = toPositiveInt(env.STALE_LINK_DAYS, 30);
+  const companyMatchIndex =
+    options?.companyMatchIndex ?? (await loadCompanyMatchIndex(env));
+  const bannedOfficeKeys = options?.bannedOfficeKeys ?? (await loadBannedOfficeKeys(env));
   const query = buildOfficesQuery(center.lat, center.lon, radiusM);
   const elements = await fetchOverpassElements(env, query);
   const normalizedOffices = normalizeOverpassElements(elements);
-  const offices = capOfficesByLimit(center, normalizedOffices, maxOffices);
+  const cappedOffices = capOfficesByLimit(center, normalizedOffices, maxOffices);
+  const { matchedOffices, matchedCount, filteredOutCount } =
+    filterOfficesWithKnownCompanies(cappedOffices, companyMatchIndex);
+  const offices = matchedOffices.filter(
+    (office) => !bannedOfficeKeys.has(officeKey(office.osmType, office.osmId))
+  );
 
   const seenAt = new Date().toISOString();
   const links = createLinks(center, offices, seenAt);
@@ -213,12 +266,20 @@ export async function refreshCenterOffices(
     }
   }
 
-  const prunedLinks = await pruneStaleCenterLinks(env.DB, center.id, staleDays);
+  const prunedUnmatchedLinks = await pruneCenterLinksNotSeenSince(
+    env.DB,
+    center.id,
+    seenAt
+  );
+  const prunedStaleLinks = await pruneStaleCenterLinks(env.DB, center.id, staleDays);
+  const prunedLinks = prunedUnmatchedLinks + prunedStaleLinks;
 
   return {
     centerId: center.id,
     centerName: center.name,
-    officesFetched: offices.length,
+    officesFetched: cappedOffices.length,
+    officesMatchedCompanies: matchedCount,
+    officesFilteredOutNoCompanyMatch: filteredOutCount,
     linksUpserted: links.length,
     prunedLinks,
     wikidataEntitiesFetched,
@@ -245,14 +306,23 @@ export async function runScheduledRefresh(env: Env): Promise<void> {
 
   let processed = 0;
   let totalFetched = 0;
+  let totalMatchedCompanies = 0;
+  let totalFilteredOutNoCompanyMatch = 0;
   let totalWikidataEntitiesFetched = 0;
   let totalWikidataOfficesUpdated = 0;
+  const companyMatchIndex = await loadCompanyMatchIndex(env);
+  const bannedOfficeKeys = await loadBannedOfficeKeys(env);
 
   for (const center of centers) {
     try {
-      const result = await refreshCenterOffices(env, center);
+      const result = await refreshCenterOffices(env, center, {
+        companyMatchIndex,
+        bannedOfficeKeys,
+      });
       processed += 1;
       totalFetched += result.officesFetched;
+      totalMatchedCompanies += result.officesMatchedCompanies;
+      totalFilteredOutNoCompanyMatch += result.officesFilteredOutNoCompanyMatch;
       totalWikidataEntitiesFetched += result.wikidataEntitiesFetched;
       totalWikidataOfficesUpdated += result.wikidataOfficesUpdated;
 
@@ -262,6 +332,9 @@ export async function runScheduledRefresh(env: Env): Promise<void> {
           centerId: result.centerId,
           centerName: result.centerName,
           officesFetched: result.officesFetched,
+          officesMatchedCompanies: result.officesMatchedCompanies,
+          officesFilteredOutNoCompanyMatch:
+            result.officesFilteredOutNoCompanyMatch,
           linksUpserted: result.linksUpserted,
           prunedLinks: result.prunedLinks,
           wikidataEntitiesFetched: result.wikidataEntitiesFetched,
@@ -294,6 +367,8 @@ export async function runScheduledRefresh(env: Env): Promise<void> {
       cursorEnd: lastCenter.id,
       centersProcessed: processed,
       officesFetched: totalFetched,
+      officesMatchedCompanies: totalMatchedCompanies,
+      officesFilteredOutNoCompanyMatch: totalFilteredOutNoCompanyMatch,
       wikidataEntitiesFetched: totalWikidataEntitiesFetched,
       wikidataOfficesUpdated: totalWikidataOfficesUpdated,
     })
@@ -307,6 +382,9 @@ export async function runRefreshAllCenters(
     batchSize?: number;
     radiusM?: number;
     maxOffices?: number | null;
+    fullClean?: boolean;
+    centerRetryCount?: number;
+    retryDelayMs?: number;
   }
 ): Promise<RefreshAllResult> {
   const batchSize = Math.max(
@@ -318,9 +396,26 @@ export async function runRefreshAllCenters(
   );
   const throttleMs = Math.max(
     0,
-    toPositiveInt(
-      String(options?.throttleMs ?? env.OVERPASS_THROTTLE_MS ?? "1200"),
-      1200
+    toNonNegativeInt(options?.throttleMs ?? env.OVERPASS_THROTTLE_MS, 1200)
+  );
+  const centerRetryCount = Math.min(
+    5,
+    Math.max(
+      0,
+      toNonNegativeInt(
+        options?.centerRetryCount ?? env.REFRESH_CENTER_RETRY_COUNT,
+        3
+      )
+    )
+  );
+  const retryDelayMs = Math.min(
+    60000,
+    Math.max(
+      0,
+      toNonNegativeInt(
+        options?.retryDelayMs ?? env.REFRESH_CENTER_RETRY_DELAY_MS,
+        2000
+      )
     )
   );
   const radiusM =
@@ -328,21 +423,35 @@ export async function runRefreshAllCenters(
     Number.isFinite(options.radiusM) &&
     options.radiusM > 0
       ? Math.trunc(options.radiusM)
-      : toPositiveInt(env.DEFAULT_RADIUS_M, 50000);
+      : toPositiveInt(env.DEFAULT_RADIUS_M, 100000);
   const maxOffices =
     typeof options?.maxOffices === "number" &&
     Number.isFinite(options.maxOffices) &&
     options.maxOffices > 0
       ? Math.trunc(options.maxOffices)
       : null;
+  const fullClean = options?.fullClean === true;
 
   let cursor = 0;
+  let cleanedLinksDeleted = 0;
+  let cleanedOfficesDeleted = 0;
   let centersAttempted = 0;
   let centersSucceeded = 0;
   let centersFailed = 0;
   let officesFetched = 0;
+  let officesMatchedCompanies = 0;
+  let officesFilteredOutNoCompanyMatch = 0;
   let wikidataEntitiesFetched = 0;
   let wikidataOfficesUpdated = 0;
+
+  if (fullClean) {
+    const cleanupResult = await purgeAllOfficePoints(env.DB);
+    cleanedLinksDeleted = cleanupResult.linksDeleted;
+    cleanedOfficesDeleted = cleanupResult.officesDeleted;
+  }
+
+  const companyMatchIndex = await loadCompanyMatchIndex(env);
+  const bannedOfficeKeys = await loadBannedOfficeKeys(env);
 
   while (true) {
     const centers = await listCentersAfterCursor(env.DB, cursor, batchSize);
@@ -353,13 +462,50 @@ export async function runRefreshAllCenters(
     for (const center of centers) {
       centersAttempted += 1;
 
-      try {
-        const result = await refreshCenterOffices(env, center, {
-          radiusM,
-          maxOffices,
-        });
+      const attemptsAllowed = centerRetryCount + 1;
+      let result: RefreshCenterResult | null = null;
+      let lastError: unknown = null;
+
+      for (let attempt = 1; attempt <= attemptsAllowed; attempt += 1) {
+        try {
+          result = await refreshCenterOffices(env, center, {
+            radiusM,
+            maxOffices,
+            companyMatchIndex,
+            bannedOfficeKeys,
+          });
+          break;
+        } catch (error) {
+          lastError = error;
+
+          if (attempt < attemptsAllowed) {
+            const nextAttempt = attempt + 1;
+            console.warn(
+              JSON.stringify({
+                event: "refresh_all_center_retry",
+                centerId: center.id,
+                centerName: center.name,
+                attempt,
+                nextAttempt,
+                maxAttempts: attemptsAllowed,
+                retryDelayMs,
+                message: error instanceof Error ? error.message : "unknown error",
+              })
+            );
+
+            if (retryDelayMs > 0) {
+              await sleep(retryDelayMs);
+            }
+          }
+        }
+      }
+
+      if (result) {
         centersSucceeded += 1;
         officesFetched += result.officesFetched;
+        officesMatchedCompanies += result.officesMatchedCompanies;
+        officesFilteredOutNoCompanyMatch +=
+          result.officesFilteredOutNoCompanyMatch;
         wikidataEntitiesFetched += result.wikidataEntitiesFetched;
         wikidataOfficesUpdated += result.wikidataOfficesUpdated;
 
@@ -369,20 +515,25 @@ export async function runRefreshAllCenters(
             centerId: result.centerId,
             centerName: result.centerName,
             officesFetched: result.officesFetched,
+            officesMatchedCompanies: result.officesMatchedCompanies,
+            officesFilteredOutNoCompanyMatch:
+              result.officesFilteredOutNoCompanyMatch,
             linksUpserted: result.linksUpserted,
             prunedLinks: result.prunedLinks,
             wikidataEntitiesFetched: result.wikidataEntitiesFetched,
             wikidataOfficesUpdated: result.wikidataOfficesUpdated,
           })
         );
-      } catch (error) {
+      } else {
         centersFailed += 1;
         console.error(
           JSON.stringify({
             event: "refresh_all_center_error",
             centerId: center.id,
             centerName: center.name,
-            message: error instanceof Error ? error.message : "unknown error",
+            attempts: attemptsAllowed,
+            message:
+              lastError instanceof Error ? lastError.message : "unknown error",
           })
         );
       }
@@ -399,31 +550,45 @@ export async function runRefreshAllCenters(
   console.log(
     JSON.stringify({
       event: "refresh_all_complete",
+      fullClean,
+      cleanedLinksDeleted,
+      cleanedOfficesDeleted,
       centersAttempted,
       centersSucceeded,
       centersFailed,
       officesFetched,
+      officesMatchedCompanies,
+      officesFilteredOutNoCompanyMatch,
       wikidataEntitiesFetched,
       wikidataOfficesUpdated,
       throttleMs,
       batchSize,
       radiusM,
       maxOffices,
+      centerRetryCount,
+      retryDelayMs,
       cursorEnd: cursor,
     })
   );
 
   return {
+    fullClean,
+    cleanedLinksDeleted,
+    cleanedOfficesDeleted,
     centersAttempted,
     centersSucceeded,
     centersFailed,
     officesFetched,
+    officesMatchedCompanies,
+    officesFilteredOutNoCompanyMatch,
     wikidataEntitiesFetched,
     wikidataOfficesUpdated,
     throttleMs,
     batchSize,
     radiusM,
     maxOffices,
+    centerRetryCount,
+    retryDelayMs,
     cursorEnd: cursor,
   };
 }
